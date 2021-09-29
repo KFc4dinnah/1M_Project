@@ -1,0 +1,244 @@
+---
+title: "OneMount Data test"
+author: "Khiem Phung"
+date: "9/28/2021"
+output: word_document
+---
+
+Install all required packages 
+```{r}
+library(dplyr)
+library(tidyverse)
+library(readxl)
+library(lubridate)
+```
+
+Then we import the data set
+```{r}
+#import the data
+df <- read_excel("C:/Users/khiem.phung/Downloads/Test_Data_Skill.xlsx", 
+                              sheet = "Data")
+```
+
+SQL Test
+1.
+```{r}
+###SQL test
+#first two services and the date 
+df_first2 <- df %>%
+  select(User_id,Serviceid,Date) %>%
+  group_by(User_id) %>%
+  arrange(Date) %>%
+  group_by(User_id) %>%
+  slice(1:2)
+```
+
+2.
+```{r}
+#last service and the date
+df_last <- df %>%
+  select(User_id,Serviceid,Date) %>%
+  group_by(User_id) %>%
+  arrange(desc(Date)) %>%
+  group_by(User_id) %>%
+  slice(1)
+```
+
+3.
+```{r}
+#distinct serviceid that users use
+df_service <- df %>%
+  distinct(User_id,Serviceid,Date) %>%
+  group_by(User_id) %>%
+  count()
+```
+
+Present the results in SQL format
+```{r}
+#put data in wide format
+df_first_wide <- df_first2 %>%
+  merge(df_first2[-1,], by = 'User_id') %>%
+  group_by(User_id) %>%
+  slice(1)
+
+#merge all tables together 
+df_sql <- df_first_wide %>%
+  inner_join(df_last, by = 'User_id') %>%
+  inner_join(df_service, by = 'User_id')
+
+#rename the columns 
+df_sql <- df_sql %>%
+  rename(FirstServiceid = Serviceid.x,
+         FirstServiceDate = Date.x,
+         SecondServiceid = Serviceid.y,
+         SecondServiceDate = Date.y,
+         LastServiceid = Serviceid,
+         LastServiceDate = Date,
+         TotalService = n)
+
+#reorder columns 
+df_sql <- df_sql[c(1,2,4,3,5,6,7,8)]
+df_sql
+```
+
+Analysis Test
+1.
+```{r}
+#duplicate to a new df 
+df_sql2 <- df_sql
+#create customer's age column
+df_sql2$Customer_age <- (df_sql$LastServiceDate
+                        - df_sql$FirstServiceDate)
+df_sql2$Customer_age <- time_length(df_sql2$Customer_age,
+                                    unit = 'days')
+
+#create table with user id and their age 
+df_age <- df_sql2 %>%
+  select(User_id, Customer_age)
+#join that table with the original table to get user id, their age, and all
+#service ids they use
+df_age <- df_age %>%
+  inner_join(df, by = 'User_id')
+
+#select only age groups and all service id used 
+df_age2 <- df_age %>%
+  ungroup(User_id) %>%
+  select(Customer_age, Serviceid) %>%
+  distinct()
+
+#initially visualize the clusters using scatterplot
+ggplot(df_age2, aes(x = Customer_age,
+                    y = Serviceid)) +
+  geom_point()
+```
+Based on the plot, we can see that the service ids are clustered in three main groups: 
+- Customers with age less than 3 months
+- Customers with age from 3 months to a year 
+- Customers with age over a year 
+
+We then find all the service ids based on those groups.
+
+- Service ids of customers with age less than 3 months:
+```{r}
+#print out serviceid with customer age < 92
+df_age2 %>%
+  group_by(Customer_age) %>%
+  filter(Customer_age < 92) %>%
+  ungroup(Customer_age) %>%
+  select(Serviceid)
+```
+
+- Service ids of customers with age between 3 months and a year 
+```{r}
+#print out serviceid with customer age > 90 and < 365
+df_age2 %>%
+  group_by(Customer_age) %>%
+  filter(Customer_age > 90, Customer_age < 365) %>%
+  ungroup(Customer_age) %>%
+  select(Serviceid)
+```
+
+- Service ids of customers with age over a year 
+```{r}
+#print out serviceid with customer age > 365
+df_age2 %>%
+  group_by(Customer_age) %>%
+  filter(Customer_age > 365) %>%
+  ungroup(Customer_age) %>%
+  select(Serviceid)
+```
+
+2. Cross-sales service
+Call the required library.
+```{r}
+library(plyr)
+library(arules)
+library(arulesViz)
+```
+
+First, we have to group all the Service ids customers used by User id and date.
+```{r}
+#get transaction data by putting all service ids on one row, grouped by
+#users and the date users used those services
+df_transaction <- ddply(df,c('User_id','Date'),
+                        function(df1)paste(df1$Serviceid,
+                                           collapse = ','))
+#select on the service column 
+df_transaction <- df_transaction %>%
+  select(V1)
+```
+This would be called the basket format. For analysis, we will store this transaction data to .csv file and load it back to convert it into an object of the transaction class.
+```{r}
+#store the data to a csv file 
+write.csv(df_transaction,
+'C:/Users/khiem.phung/Downloads/basket_transaction.csv',
+quote = FALSE, row.names = FALSE)
+
+#load the data into transaction class
+tr <- read.transactions('C:/Users/khiem.phung/Downloads/basket_transaction.csv',
+                        format = 'basket', sep=',')
+```
+
+We can see the top 10 service used by customers.
+```{r}
+#see the service with most frequent appearance 
+itemFrequencyPlot(tr,topN=10,type="absolute")
+```
+This plot shows that Service id of 981, 667, and 1014 were used the most by customers. Thus, one thing that we can do is to focus more on these services for development and analysis in the future. 
+
+We then proceed to mine the rules using the ARRIORI algorithm. 
+```{r}
+#mine the rules using the APRIORI algorithm
+association.rules <- apriori(tr, 
+                             parameter = list(supp=0.001, conf=0.8))
+summary(association.rules)
+
+#sort the rules by count 
+association.rules <- sort(association.rules, by="count", decreasing=TRUE)
+```
+The apriori will take tr as the transaction object on which mining is to be applied. parameter will allow you to set min_sup and min_confidence. The default values for parameter are minimum support of 0.1, the minimum confidence of 0.8.
+
+Since there is a total of 2756 rules, we will look at the top 10 rules.
+```{r}
+#print top 10 rules
+inspect(association.rules[1:10])
+```
+Using the above output, we can identify the cross sales items as:
+- 100% of customers who used service 333 would also use service 667, based on 112 counts. 
+- 98% of customers who used service 982 would also use service 268, based on 64 counts. - 100% of customers who used service 326 would also use service 666, based on 57 counts.
+
+We could present our analysis in a visually appealing manner by drawing a chart of connected items. 
+```{r}
+#visualize the rules 
+plot(association.rules[1:10],method="graph", 
+     shading = NA)
+```
+Bonus question: 
+One thing that we as service providers could analyze is when the customers were using the services, and by how much. 
+We then could count total number of distinct services used each date
+```{r}
+##Bonus question
+detach("package:plyr", unload=TRUE)
+#count number of service ids used each date 
+df_date <- df %>%
+  distinct(Date, Serviceid) %>%
+  group_by(Date) %>%
+  count()
+
+#visualize the findings
+ggplot(df_date, aes(x = Date, y = n)) +
+  geom_point()
+```
+We noticed that most of the services are used in 2018. Thus, we can remove those used in 2017 for a better view. 
+```{r}
+#filter the date to 2018
+df_date_2018 <- df_date %>%
+  filter(Date > '2017-12-31')
+
+#visualize the new series 
+ggplot(df_date_2018, aes(x = Date, y = n)) +
+  geom_line()
+
+```
+Now that we have a time series of all services used by customers from Jan 2018 to July 2018. With this, we can analyze whether or not this has seasonality, as well as the trend of services used if any. From that, we can also predict the number of services used in upcoming days. 
+
